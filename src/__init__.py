@@ -1,1 +1,0 @@
-from .action_identification import extract_sequence
