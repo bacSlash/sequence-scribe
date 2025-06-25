@@ -12,7 +12,9 @@ from .processors import (
 )
 from .models import (
     UIGraphEmbedder,
-    HMMAnalyzer
+)
+from .analysis import (
+    HMMAnalyzer,
 )
 from .utils import (
     load_embeddings,
