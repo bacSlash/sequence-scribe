@@ -48,7 +48,7 @@ class ActionProcessor:
         """Get caption model with lazy loading."""
         if self._caption_model_processor is None:
             try:
-                from .utils import get_caption_model_processor
+                from .legacy.utils import get_caption_model_processor
                 self._caption_model_processor = get_caption_model_processor(
                     'florence2', 'Microsoft/Florence-2-base'
                 )
