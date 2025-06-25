@@ -7,7 +7,7 @@ import argparse
 import pickle
 
 # Import your existing graph builder class
-from graph_representation_headless import SimpleUIGraph
+from .graph_representation_headless import SimpleUIGraph
 
 def save_graphs_for_embedding(csv_path, output_dir="graph_data", proximity_threshold=0.2):
     """
