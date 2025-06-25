@@ -1,0 +1,129 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sequence-scribe"
+version = "0.1.0"
+description = "A tool for analyzing UI interaction sequences using computer vision and machine learning, and generates state predictions using a HMM model."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "The Design Research Collective"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+requires-python = ">=3.8"
+dependencies = [
+    # Main frameworks
+    "torch>=2.0.0",
+    "torch-geometric>=2.4.0",
+    "torchvision>=0.15.0",
+    "sentence-transformers>=2.2.0",
+    "numpy>=1.21.0",
+    
+    # Deep learning / ML libraries
+    "transformers>=4.30.0",
+    "accelerate>=0.20.0",
+    "timm>=0.9.0",
+    "hmmlearn>=0.3.0",
+    "einops>=0.7.0",
+    "safetensors>=0.3.0",
+    
+    # Computer vision
+    "ultralytics>=8.0.0",
+    "supervision>=0.15.0",
+    "opencv-python>=4.8.0",
+    "easyocr>=1.7.0",
+    "Pillow>=9.0.0",
+    "scikit-image>=0.20.0",
+    
+    # PaddlePaddle ecosystem (optional)
+    "paddlepaddle>=2.5.0",
+    "paddleocr>=2.7.0",
+    
+    # Hugging Face ecosystem
+    "huggingface_hub>=0.16.0",
+    "tokenizers>=0.13.0",
+    
+    # Data processing and analysis
+    "matplotlib>=3.6.0",
+    "pandas>=1.5.0",
+    "scipy>=1.9.0",
+    "scikit-learn>=1.2.0",
+    "seaborn>=0.12.0",
+    "plotly>=5.0.0",
+    
+    # Utilities and tools
+    "tqdm>=4.64.0",
+    "requests>=2.28.0",
+    "PyYAML>=6.0",
+    
+    # Graph processing
+    "networkx>=2.8.0",
+    
+    # Additional dependencies
+    "lxml>=4.9.0",
+    "beautifulsoup4>=4.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "isort>=5.10.0",
+    "flake8>=5.0.0",
+    "mypy>=1.0.0",
+]
+gpu = [
+    "bitsandbytes>=0.41.0",
+]
+api = [
+    "openai>=1.0.0",
+    "gradio>=4.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bacSlash/seqeunce-scribe"
+Repository = "https://github.com/bacSlash/seqeunce-scribe"
+Issues = "https://github.com/bacSlash/seqeunce-scribe/issues" # Replace all with cmudrc links
+
+[project.scripts]
+sequence-scribe = "sequence_scribe.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sequence_scribe = ["weights/**/*", "data/**/*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
