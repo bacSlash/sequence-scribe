@@ -36,7 +36,7 @@ class ActionProcessor:
         if self._yolo_model is None:
             try:
                 model_path = self._find_model_path()
-                from .utils import get_yolo_model
+                from .legacy.utils import get_yolo_model
                 self._yolo_model = get_yolo_model(model_path)
                 self.logger.info(f"Loaded YOLO model from: {model_path}")
             except Exception as e:
