@@ -79,7 +79,7 @@ class HMMAnalyzer:
             # Choose analysis method based on embedding type
             if embedding_type == "gnn":
                 results = self._analyze_gnn_embeddings(
-                    embeddings_file=embeddings_file,
+                    embedding_file=embeddings_file,
                     output_dir=str(output_dir),
                     n_states=n_states,
                     covariance_type=covariance_type,
@@ -88,7 +88,7 @@ class HMMAnalyzer:
                     pca_components=pca_components,
                     normalize=normalize,
                     apply_standard_scaling=apply_standard_scaling,
-                    detect_outliers=detect_outliers,
+                    detect_and_handle_outliers=detect_outliers,
                     z_threshold=z_threshold,
                     **kwargs
                 )
@@ -103,7 +103,7 @@ class HMMAnalyzer:
                     pca_components=pca_components,
                     normalize=normalize,
                     apply_standard_scaling=apply_standard_scaling,
-                    detect_outliers=detect_outliers,
+                    detect_outliers_flag=detect_outliers,
                     z_threshold=z_threshold,
                     **kwargs
                 )
