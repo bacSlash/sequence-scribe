@@ -16,6 +16,8 @@ import pandas as pd
 import matplotlib.patches as mpatches
 import networkx as nx
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from itertools import combinations
+import glob
 
 def load_gnn_embeddings(npz_file: str) -> Tuple[Dict[str, np.ndarray], List[str]]:
     
@@ -413,437 +415,6 @@ def plot_pca_variance(
         plt.show()
     plt.close()
 
-def save_evaluation_results(
-    evaluation: Dict[str, Any], 
-    output_path: str, 
-    embedding_info: Dict[str, Any]
-) -> None:
-    
-    # Convert numpy arrays to lists for JSON serialization
-    results = {
-        "embedding_info": embedding_info,
-        "log_likelihood": float(evaluation["log_likelihood"]),
-        "state_proportions": evaluation["state_proportions"].tolist(),
-        "transition_matrix": evaluation["transition_matrix"].tolist(),
-        "num_frames": len(evaluation["hidden_states"]),
-        "hidden_states": evaluation["hidden_states"].tolist()
-    }
-    
-    # Add frame to state mapping
-    frame_states = {}
-    for frame, state in evaluation["frame_to_state"].items():
-        frame_states[str(frame)] = int(state)
-    results["frame_to_state"] = frame_states
-    
-    # Format transition counts for readability
-    transition_counts = {}
-    for (from_state, to_state), count in evaluation["transition_counts"].items():
-        transition_counts[f"{from_state}->{to_state}"] = count
-    results["transition_counts"] = transition_counts
-    
-    # Save to JSON
-    with open(output_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    print(f"Saved evaluation results to {output_path}")
-
-def process_gnn_embeddings(
-    embedding_file: str,
-    output_dir: str,
-    n_states: int = 3,
-    covariance_type: str = "diag",
-    n_iter: int = 100,
-    train_ratio: float = 2/3,
-    pca_components: int = 20,
-    normalize: bool = True,
-    apply_standard_scaling: bool = True,
-    detect_and_handle_outliers: bool = True,
-    z_threshold: float = 3.0
-) -> Dict[str, Any]:
-    
-    print(f"\nProcessing {embedding_file}...")
-    
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Load GNN embeddings
-    embeddings_dict, image_names = load_gnn_embeddings(embedding_file)
-    
-    # Create sequential embeddings array
-    embeddings = create_sequential_embeddings(embeddings_dict, image_names)
-    print(f"Created sequential embeddings with shape {embeddings.shape}")
-    
-    # Plot original embedding distributions
-    orig_dist_plot = os.path.join(output_dir, "original_embedding_distributions.png")
-    plot_embedding_distributions(embeddings, orig_dist_plot, title="Original GNN Embedding Distributions")
-    
-    # Normalization step (if enabled)
-    if normalize:
-        print("Normalizing embeddings to unit length...")
-        embeddings = normalize_embeddings(embeddings)
-        
-        # Plot normalized embedding distributions
-        norm_dist_plot = os.path.join(output_dir, "normalized_embedding_distributions.png")
-        plot_embedding_distributions(embeddings, norm_dist_plot, title="Normalized GNN Embedding Distributions")
-    
-    # Outlier detection (if enabled)
-    if detect_and_handle_outliers:
-        print(f"Detecting outliers using Z-score threshold of {z_threshold}...")
-        outlier_indices, cleaned_embeddings = detect_outliers(embeddings, z_threshold)
-        
-        if len(outlier_indices) > 0:
-            print(f"Detected {len(outlier_indices)} outliers: {outlier_indices}")
-            print("Replacing outliers with dimension means...")
-            embeddings = cleaned_embeddings
-            
-            # Plot cleaned embedding distributions
-            cleaned_dist_plot = os.path.join(output_dir, "cleaned_embedding_distributions.png")
-            plot_embedding_distributions(embeddings, cleaned_dist_plot, title="Cleaned GNN Embedding Distributions")
-        else:
-            print("No outliers detected.")
-    
-    # Split data sequentially
-    split_index = int(len(embeddings) * train_ratio)
-    train_embeddings = embeddings[:split_index]
-    train_frames = image_names[:split_index]
-    test_embeddings = embeddings[split_index:]
-    test_frames = image_names[split_index:]
-    
-    print(f"Split data: {len(train_embeddings)} training frames, {len(test_embeddings)} testing frames")
-    
-    # Apply dimensionality reduction
-    print(f"Applying PCA dimensionality reduction to {pca_components} components...")
-    train_reduced, test_reduced, pca_model, scaler = reduce_dimensions(
-        train_embeddings=train_embeddings,
-        test_embeddings=test_embeddings,
-        n_components=pca_components,
-        apply_standard_scaling=apply_standard_scaling
-    )
-    
-    # Plot PCA explained variance
-    pca_variance_plot = os.path.join(output_dir, "pca_explained_variance.png")
-    plot_pca_variance(pca_model, pca_variance_plot)
-    
-    # Plot reduced embedding distributions
-    reduced_dist_plot = os.path.join(output_dir, "reduced_embedding_distributions.png")
-    plot_embedding_distributions(
-        train_reduced, reduced_dist_plot, 
-        n_dims=min(5, train_reduced.shape[1]),
-        title="Reduced GNN Embedding Distributions" + (" (with Standard Scaling)" if apply_standard_scaling else "")
-    )
-    
-    # Train HMM on dimensionality-reduced training data
-    print(f"Training HMM with {n_states} states...")
-    model, train_log_likelihood = train_hmm(
-        embeddings=train_reduced,
-        n_states=n_states,
-        covariance_type=covariance_type,
-        n_iter=n_iter
-    )
-    print(f"Training complete. Train log likelihood: {train_log_likelihood:.2f}")
-    
-    # Evaluate on training data
-    print("Evaluating on training data...")
-    train_evaluation = evaluate_hmm(model, train_reduced, train_frames)
-    
-    # Evaluate on test data
-    print("Evaluating on test data...")
-    test_evaluation = evaluate_hmm(model, test_reduced, test_frames)
-    test_log_likelihood = test_evaluation["log_likelihood"]
-    print(f"Test log likelihood: {test_log_likelihood:.2f}")
-    
-    # Collect embedding info
-    embedding_info = {
-        "file": embedding_file,
-        "type": "GNN Embeddings",
-        "n_states": n_states,
-        "covariance_type": covariance_type,
-        "original_embedding_shape": embeddings.shape,
-        "reduced_embedding_shape": train_reduced.shape,
-        "pca_components": pca_components,
-        "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
-        "normalization_applied": normalize,
-        "standard_scaling_applied": apply_standard_scaling,
-        "outlier_detection_applied": detect_and_handle_outliers,
-        "outlier_z_threshold": z_threshold if detect_and_handle_outliers else None,
-        "outliers_detected": len(outlier_indices) if detect_and_handle_outliers else None,
-        "train_ratio": train_ratio,
-        "train_frames": len(train_frames),
-        "test_frames": len(test_frames)
-    }
-    
-    # Generate and save plots for the full model
-    print("Generating plots...")
-    
-    # Transition matrix plot
-    transition_plot_file = os.path.join(output_dir, f"transition_matrix.png")
-    plot_transition_matrix(
-        model.transmat_, 
-        transition_plot_file,
-        title=f"HMM Transition Matrix (n_states={n_states})"
-    )
-    
-    # Markov chain graph plot
-    markov_graph_file = os.path.join(output_dir, f"markov_chain_graph.png")
-    plot_hmm_graph(
-        model.transmat_,
-        markov_graph_file,
-        title=f"HMM Markov Chain (n_states={n_states})"
-    )
-    
-    # State means plot
-    means_plot_file = os.path.join(output_dir, f"state_means.png")
-    plot_state_means(
-        model.means_, 
-        means_plot_file,
-        title=f"HMM State Means (n_states={n_states})"
-    )
-    
-    # State sequence plot for training data
-    train_sequence_plot_file = os.path.join(output_dir, f"train_state_sequence.png")
-    plot_state_sequence(
-        train_evaluation["hidden_states"], 
-        train_frames, 
-        train_sequence_plot_file,
-        title=f"HMM State Sequence - Training Data (n_states={n_states})"
-    )
-    
-    # State sequence plot for test data
-    test_sequence_plot_file = os.path.join(output_dir, f"test_state_sequence.png")
-    plot_state_sequence(
-        test_evaluation["hidden_states"], 
-        test_frames, 
-        test_sequence_plot_file,
-        title=f"HMM State Sequence - Test Data (n_states={n_states})"
-    )
-    
-    # Plot state durations
-    durations_plot_file = os.path.join(output_dir, f"state_durations.png")
-    plot_state_durations(
-        train_evaluation["state_durations"],
-        durations_plot_file,
-        title=f"State Durations (n_states={n_states})"
-    )
-    
-    # Save evaluation results
-    train_results_file = os.path.join(output_dir, "train_evaluation_results.json")
-    save_evaluation_results(train_evaluation, train_results_file, {**embedding_info, "dataset": "train"})
-    
-    test_results_file = os.path.join(output_dir, "test_evaluation_results.json")
-    save_evaluation_results(test_evaluation, test_results_file, {**embedding_info, "dataset": "test"})
-    
-    # Create comparison summary
-    summary = {
-        "embedding_type": "GNN Embeddings",
-        "n_states": n_states,
-        "covariance_type": covariance_type,
-        "pca_components": pca_components,
-        "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
-        "normalization_applied": normalize,
-        "standard_scaling_applied": apply_standard_scaling,
-        "outlier_detection_applied": detect_and_handle_outliers,
-        "train_log_likelihood": float(train_log_likelihood),
-        "test_log_likelihood": float(test_log_likelihood),
-        "train_frames": len(train_frames),
-        "test_frames": len(test_frames)
-    }
-    
-    summary_file = os.path.join(output_dir, "evaluation_summary.json")
-    with open(summary_file, 'w') as f:
-        json.dump(summary, f, indent=2)
-    
-    print(f"Processing complete for {embedding_file}")
-    
-    return {
-        "file": embedding_file,
-        "train_log_likelihood": train_log_likelihood,
-        "test_log_likelihood": test_log_likelihood,
-        "n_states": n_states,
-        "pca_components": pca_components
-    }
-
-def compare_state_sequences(
-    text_embedding_file: Optional[str] = None,
-    gnn_embedding_file: Optional[str] = None,
-    output_dir: str = "comparison_results",
-    n_states: int = 3,
-    pca_components: int = 20
-) -> None:
-    
-    if text_embedding_file is None and gnn_embedding_file is None:
-        print("Error: At least one embedding file must be provided")
-        return
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    text_states = None
-    gnn_states = None
-    
-    # Process text embeddings if provided
-    if text_embedding_file and os.path.exists(text_embedding_file):
-        print(f"Processing text embeddings from {text_embedding_file}...")
-        text_output_dir = os.path.join(output_dir, "text_embeddings")
-        os.makedirs(text_output_dir, exist_ok=True)
-        
-        # Use the existing function from naive_hmm.py to load text embeddings
-        try:
-            # Load text embeddings
-            text_data = np.load(text_embedding_file)
-            if 'embeddings' in text_data:
-                text_embeddings = text_data['embeddings']
-                text_frame_names = text_data['frame_names'].tolist()
-            elif 'observations' in text_data:
-                text_embeddings = text_data['observations']
-                text_frame_names = text_data['frame_names'].tolist()
-            else:
-                # Try to infer format by checking all keys
-                print("Warning: Unknown text embedding format. Trying to infer...")
-                if len(text_data.files) > 0:
-                    # Use the first key as embeddings
-                    key = text_data.files[0]
-                    text_embeddings = text_data[key]
-                    text_frame_names = [f"frame_{i}" for i in range(len(text_embeddings))]
-            
-            # Process text embeddings with PCA
-            # Apply PCA
-            if text_embeddings.shape[1] > pca_components:
-                pca = PCA(n_components=pca_components)
-                text_reduced = pca.fit_transform(text_embeddings)
-            else:
-                text_reduced = text_embeddings
-                
-            # Train HMM on text embeddings
-            text_model = hmm.GaussianHMM(
-                n_components=n_states,
-                covariance_type="diag",
-                n_iter=100,
-                random_state=42
-            )
-            text_model.fit(text_reduced)
-            
-            # Get the state sequence
-            text_states = text_model.predict(text_reduced)
-            
-        except Exception as e:
-            print(f"Error processing text embeddings: {e}")
-            text_states = None
-    
-    # Process GNN embeddings if provided
-    if gnn_embedding_file and os.path.exists(gnn_embedding_file):
-        print(f"Processing GNN embeddings from {gnn_embedding_file}...")
-        gnn_output_dir = os.path.join(output_dir, "gnn_embeddings")
-        os.makedirs(gnn_output_dir, exist_ok=True)
-        
-        try:
-            # Load GNN embeddings
-            gnn_dict, gnn_frame_names = load_gnn_embeddings(gnn_embedding_file)
-            gnn_embeddings = create_sequential_embeddings(gnn_dict, gnn_frame_names)
-            
-            # Apply PCA
-            if gnn_embeddings.shape[1] > pca_components:
-                pca = PCA(n_components=pca_components)
-                gnn_reduced = pca.fit_transform(gnn_embeddings)
-            else:
-                gnn_reduced = gnn_embeddings
-                
-            # Train HMM on GNN embeddings
-            gnn_model = hmm.GaussianHMM(
-                n_components=n_states,
-                covariance_type="diag",
-                n_iter=100,
-                random_state=42
-            )
-            gnn_model.fit(gnn_reduced)
-            
-            # Get the state sequence
-            gnn_states = gnn_model.predict(gnn_reduced)
-            
-        except Exception as e:
-            print(f"Error processing GNN embeddings: {e}")
-            gnn_states = None
-    
-    # Compare state sequences if both are available
-    if text_states is not None and gnn_states is not None:
-        # Make sure they have the same length for comparison
-        min_length = min(len(text_states), len(gnn_states))
-        text_states = text_states[:min_length]
-        gnn_states = gnn_states[:min_length]
-        
-        # Calculate state matching
-        # This is a simplified approach - in practice, you might want to use
-        # more sophisticated methods like adjusted Rand index or normalized mutual information
-        matching = np.zeros((n_states, n_states), dtype=int)
-        for i in range(min_length):
-            matching[text_states[i], gnn_states[i]] += 1
-            
-        # Plot state matching matrix
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(
-            matching, 
-            annot=True, 
-            fmt='d', 
-            cmap='viridis', 
-            xticklabels=[f"GNN State {i}" for i in range(n_states)],
-            yticklabels=[f"Text State {i}" for i in range(n_states)]
-        )
-        plt.title("State Matching Matrix: Text Embeddings vs. GNN Embeddings")
-        plt.tight_layout()
-        
-        matching_plot_file = os.path.join(output_dir, "state_matching_matrix.png")
-        plt.savefig(matching_plot_file, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Plot state sequences together
-        plt.figure(figsize=(15, 8))
-        
-        try:
-            x = [int(name.split('_')[1].split('.')[0]) for name in gnn_frame_names[:min_length]]
-        except (IndexError, ValueError):
-            x = range(min_length)
-        
-        plt.plot(x, text_states, 'o-', label='Text Embeddings States', alpha=0.7, markersize=8)
-        plt.plot(x, gnn_states, 's-', label='GNN Embeddings States', alpha=0.7, markersize=8)
-        
-        if len(x) > 10:
-            step = max(1, len(x) // 10)
-            plt.xticks(x[::step], rotation=45, ha='right')
-        else:
-            plt.xticks(x, rotation=45, ha='right')
-            
-        plt.yticks(range(n_states))
-        plt.grid(alpha=0.3)
-        plt.xlabel("Frame")
-        plt.ylabel("State")
-        plt.title(f"HMM State Sequence Comparison (n_states={n_states})")
-        plt.legend()
-        
-        sequence_plot_file = os.path.join(output_dir, "state_sequence_comparison.png")
-        plt.savefig(sequence_plot_file, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Calculate agreement percentage
-        agreement = np.sum(text_states == gnn_states) / min_length * 100
-        print(f"State agreement: {agreement:.2f}%")
-        
-        # Save comparison results
-        comparison_results = {
-            "text_embedding_file": text_embedding_file,
-            "gnn_embedding_file": gnn_embedding_file,
-            "n_states": n_states,
-            "pca_components": pca_components,
-            "sequence_length": min_length,
-            "state_agreement_percentage": float(agreement),
-            "state_matching_matrix": matching.tolist()
-        }
-        
-        comparison_file = os.path.join(output_dir, "comparison_results.json")
-        with open(comparison_file, 'w') as f:
-            json.dump(comparison_results, f, indent=2)
-        
-        print(f"Comparison results saved to {output_dir}")
-    else:
-        print("Could not compare state sequences: one or both state sequences are unavailable")
-
 def plot_hmm_graph(
     transition_matrix: np.ndarray,
     output_path: Optional[str] = None,
@@ -982,76 +553,552 @@ def plot_hmm_graph(
         plt.show()
     plt.close()
 
-def plot_hmm_results(
-    hmm_dir: str,
-    embed_type: str = "GNN",
-    title_prefix: str = "GNN Embedding"
+def save_evaluation_results(
+    evaluation: Dict[str, Any], 
+    output_path: str, 
+    embedding_info: Dict[str, Any]
 ) -> None:
     
-    try:
-        # Load evaluation summary
-        summary_file = os.path.join(hmm_dir, "evaluation_summary.json")
-        if not os.path.exists(summary_file):
-            print(f"Error: Summary file not found at {summary_file}")
-            return
-            
-        with open(summary_file, 'r') as f:
-            summary = json.load(f)
-            
-        # Load train and test results
-        train_file = os.path.join(hmm_dir, "train_evaluation_results.json")
-        test_file = os.path.join(hmm_dir, "test_evaluation_results.json")
+    # Convert numpy arrays to lists for JSON serialization
+    results = {
+        "embedding_info": embedding_info,
+        "log_likelihood": float(evaluation["log_likelihood"]),
+        "state_proportions": evaluation["state_proportions"].tolist(),
+        "transition_matrix": evaluation["transition_matrix"].tolist(),
+        "num_frames": len(evaluation["hidden_states"]),
+        "hidden_states": evaluation["hidden_states"].tolist()
+    }
+    
+    # Add frame to state mapping
+    frame_states = {}
+    for frame, state in evaluation["frame_to_state"].items():
+        frame_states[str(frame)] = int(state)
+    results["frame_to_state"] = frame_states
+    
+    # Format transition counts for readability
+    transition_counts = {}
+    for (from_state, to_state), count in evaluation["transition_counts"].items():
+        transition_counts[f"{from_state}->{to_state}"] = count
+    results["transition_counts"] = transition_counts
+    
+    # Save to JSON
+    with open(output_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"Saved evaluation results to {output_path}")
+
+def find_embedding_files(input_dir: str) -> List[str]:
+    """Find all .npz files in the input directory."""
+    pattern = os.path.join(input_dir, "*.npz")
+    files = glob.glob(pattern)
+    if len(files) == 0:
+        raise ValueError(f"No .npz files found in {input_dir}")
+    print(f"Found {len(files)} embedding files: {[os.path.basename(f) for f in files]}")
+    return files
+
+def get_file_size(file_path: str) -> int:
+    """Get file size in bytes."""
+    return os.path.getsize(file_path)
+
+def prepare_embeddings_for_training(
+    embedding_files: List[str],
+    normalize: bool = True,
+    detect_and_handle_outliers: bool = True,
+    z_threshold: float = 3.0
+) -> Dict[str, Tuple[np.ndarray, List[str]]]:
+    """Load and preprocess embeddings from multiple files."""
+    
+    processed_embeddings = {}
+    
+    for file_path in embedding_files:
+        print(f"\nLoading and preprocessing {os.path.basename(file_path)}...")
         
-        with open(train_file, 'r') as f:
-            train_results = json.load(f)
-            
-        with open(test_file, 'r') as f:
-            test_results = json.load(f)
+        # Load embeddings
+        embeddings_dict, image_names = load_gnn_embeddings(file_path)
+        embeddings = create_sequential_embeddings(embeddings_dict, image_names)
         
-        # Extract key metrics
-        n_states = summary["n_states"]
-        train_ll = summary["train_log_likelihood"]
-        test_ll = summary["test_log_likelihood"]
-        pca_variance = summary.get("pca_explained_variance", 0)
+        # Normalization step (if enabled)
+        if normalize:
+            embeddings = normalize_embeddings(embeddings)
         
-        # Summary plot
-        plt.figure(figsize=(12, 6))
-        plt.subplot(1, 2, 1)
-        plt.bar(['Train', 'Test'], [train_ll, test_ll], color=['blue', 'orange'])
-        plt.title(f"{title_prefix} Log Likelihood")
-        plt.ylabel("Log Likelihood")
-        plt.grid(alpha=0.3)
+        # Outlier detection (if enabled)
+        if detect_and_handle_outliers:
+            outlier_indices, cleaned_embeddings = detect_outliers(embeddings, z_threshold)
+            if len(outlier_indices) > 0:
+                print(f"Detected and cleaned {len(outlier_indices)} outliers")
+                embeddings = cleaned_embeddings
         
-        plt.subplot(1, 2, 2)
-        state_props = np.array(train_results["state_proportions"])
-        plt.pie(
-            state_props, 
-            labels=[f"State {i}\n({prop:.1%})" for i, prop in enumerate(state_props)],
-            autopct='%1.1f%%',
-            startangle=90,
-            shadow=True
+        processed_embeddings[file_path] = (embeddings, image_names)
+        print(f"Processed embeddings shape: {embeddings.shape}")
+    
+    return processed_embeddings
+
+def cross_validate_hmm(
+    embedding_files: List[str],
+    output_dir: str,
+    n_states: int = 3,
+    covariance_type: str = "diag",
+    n_iter: int = 100,
+    pca_components: int = 20,
+    normalize: bool = True,
+    apply_standard_scaling: bool = True,
+    detect_and_handle_outliers: bool = True,
+    z_threshold: float = 3.0,
+    test_weight: float = 0.7,
+    train_weight: float = 0.3
+) -> Dict[str, Any]:
+    """Perform 3-fold cross-validation on embedding files."""
+    
+    if len(embedding_files) != 3:
+        raise ValueError(f"Expected exactly 3 embedding files, got {len(embedding_files)}")
+    
+    print(f"\nStarting 3-fold cross-validation...")
+    print(f"Performance metric: {test_weight:.1f} * test_ll + {train_weight:.1f} * train_ll")
+    
+    # Prepare embeddings
+    processed_embeddings = prepare_embeddings_for_training(
+        embedding_files, normalize, detect_and_handle_outliers, z_threshold
+    )
+    
+    # Generate all possible combinations of 2 files for training, 1 for testing
+    file_combinations = list(combinations(embedding_files, 2))
+    
+    cv_results = []
+    
+    for fold_idx, train_files in enumerate(file_combinations):
+        test_file = [f for f in embedding_files if f not in train_files][0]
+        
+        print(f"\n=== FOLD {fold_idx + 1}/3 ===")
+        print(f"Training on: {[os.path.basename(f) for f in train_files]}")
+        print(f"Testing on: {os.path.basename(test_file)}")
+        
+        # Create fold output directory
+        fold_dir = os.path.join(output_dir, f"fold_{fold_idx + 1}")
+        os.makedirs(fold_dir, exist_ok=True)
+        
+        # Combine training embeddings
+        train_embeddings_list = []
+        train_frame_names_list = []
+        
+        for train_file in train_files:
+            embeddings, frame_names = processed_embeddings[train_file]
+            train_embeddings_list.append(embeddings)
+            # Prefix frame names with file identifier to avoid conflicts
+            file_prefix = os.path.splitext(os.path.basename(train_file))[0]
+            prefixed_names = [f"{file_prefix}_{name}" for name in frame_names]
+            train_frame_names_list.extend(prefixed_names)
+        
+        # Concatenate training data
+        train_embeddings = np.vstack(train_embeddings_list)
+        train_frame_names = train_frame_names_list
+        
+        # Get test data
+        test_embeddings, test_frame_names = processed_embeddings[test_file]
+        
+        print(f"Training data shape: {train_embeddings.shape}")
+        print(f"Test data shape: {test_embeddings.shape}")
+        
+        # Apply dimensionality reduction
+        train_reduced, test_reduced, pca_model, scaler = reduce_dimensions(
+            train_embeddings=train_embeddings,
+            test_embeddings=test_embeddings,
+            n_components=pca_components,
+            apply_standard_scaling=apply_standard_scaling
         )
-        plt.title(f"{title_prefix} State Distribution")
         
-        plt.tight_layout()
-        summary_plot_file = os.path.join(hmm_dir, f"{embed_type.lower()}_hmm_summary.png")
-        plt.savefig(summary_plot_file, dpi=300, bbox_inches='tight')
-        plt.close()
+        # Train HMM
+        model, train_log_likelihood = train_hmm(
+            embeddings=train_reduced,
+            n_states=n_states,
+            covariance_type=covariance_type,
+            n_iter=n_iter,
+            verbose=False
+        )
         
-        print(f"Generated summary plot for {embed_type} HMM results")
+        # Evaluate on test data
+        test_evaluation = evaluate_hmm(model, test_reduced, test_frame_names)
+        test_log_likelihood = test_evaluation["log_likelihood"]
         
-    except Exception as e:
-        print(f"Error plotting HMM results: {e}")
+        # Calculate combined performance metric
+        combined_score = test_weight * test_log_likelihood + train_weight * train_log_likelihood
+        
+        print(f"Train Log Likelihood: {train_log_likelihood:.2f}")
+        print(f"Test Log Likelihood: {test_log_likelihood:.2f}")
+        print(f"Combined Score: {combined_score:.2f}")
+        
+        # Store fold results
+        fold_result = {
+            "fold": fold_idx + 1,
+            "train_files": [os.path.basename(f) for f in train_files],
+            "test_file": os.path.basename(test_file),
+            "train_log_likelihood": float(train_log_likelihood),
+            "test_log_likelihood": float(test_log_likelihood),
+            "combined_score": float(combined_score),
+            "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
+            "train_frames": len(train_frame_names),
+            "test_frames": len(test_frame_names)
+        }
+        cv_results.append(fold_result)
+        
+        # Save fold-specific results
+        fold_info = {
+            "fold": fold_idx + 1,
+            "train_files": train_files,
+            "test_file": test_file,
+            "n_states": n_states,
+            "covariance_type": covariance_type,
+            "pca_components": pca_components,
+            "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
+            "normalization_applied": normalize,
+            "standard_scaling_applied": apply_standard_scaling,
+            "outlier_detection_applied": detect_and_handle_outliers,
+            "train_frames": len(train_frame_names),
+            "test_frames": len(test_frame_names)
+        }
+        
+        # Evaluate on training data for completeness
+        train_evaluation = evaluate_hmm(model, train_reduced, train_frame_names)
+        
+        # Generate fold plots
+        # Transition matrix
+        transition_plot = os.path.join(fold_dir, "transition_matrix.png")
+        plot_transition_matrix(
+            model.transmat_, 
+            transition_plot,
+            title=f"Fold {fold_idx + 1} - HMM Transition Matrix"
+        )
+        
+        # Markov chain graph
+        markov_graph = os.path.join(fold_dir, "markov_chain_graph.png")
+        plot_hmm_graph(
+            model.transmat_,
+            markov_graph,
+            title=f"Fold {fold_idx + 1} - HMM Markov Chain"
+        )
+        
+        # State sequence for test data
+        test_sequence_plot = os.path.join(fold_dir, "test_state_sequence.png")
+        plot_state_sequence(
+            test_evaluation["hidden_states"], 
+            test_frame_names, 
+            test_sequence_plot,
+            title=f"Fold {fold_idx + 1} - Test State Sequence"
+        )
+        
+        # State means
+        means_plot = os.path.join(fold_dir, "state_means.png")
+        plot_state_means(
+            model.means_, 
+            means_plot,
+            title=f"Fold {fold_idx + 1} - HMM State Means"
+        )
+        
+        # Save fold evaluation results
+        train_results_file = os.path.join(fold_dir, "train_evaluation_results.json")
+        save_evaluation_results(train_evaluation, train_results_file, {**fold_info, "dataset": "train"})
+        
+        test_results_file = os.path.join(fold_dir, "test_evaluation_results.json")
+        save_evaluation_results(test_evaluation, test_results_file, {**fold_info, "dataset": "test"})
+        
+        # Save fold summary
+        fold_summary_file = os.path.join(fold_dir, "fold_summary.json")
+        with open(fold_summary_file, 'w') as f:
+            json.dump(fold_result, f, indent=2)
+    
+    # Find best performing fold
+    best_fold = max(cv_results, key=lambda x: x["combined_score"])
+    best_fold_idx = best_fold["fold"] - 1
+    
+    print(f"\n=== CROSS-VALIDATION RESULTS ===")
+    for result in cv_results:
+        print(f"Fold {result['fold']}: Combined Score = {result['combined_score']:.2f} "
+              f"(Train: {result['train_log_likelihood']:.2f}, Test: {result['test_log_likelihood']:.2f})")
+    
+    print(f"\nBest performing fold: {best_fold['fold']} with combined score: {best_fold['combined_score']:.2f}")
+    
+    # Save cross-validation summary
+    cv_summary = {
+        "cross_validation_results": cv_results,
+        "best_fold": best_fold,
+        "performance_weights": {"test_weight": test_weight, "train_weight": train_weight},
+        "hyperparameters": {
+            "n_states": n_states,
+            "covariance_type": covariance_type,
+            "pca_components": pca_components,
+            "normalization_applied": normalize,
+            "standard_scaling_applied": apply_standard_scaling,
+            "outlier_detection_applied": detect_and_handle_outliers
+        }
+    }
+    
+    cv_summary_file = os.path.join(output_dir, "cross_validation_summary.json")
+    with open(cv_summary_file, 'w') as f:
+        json.dump(cv_summary, f, indent=2)
+    
+    return {
+        "cv_results": cv_results,
+        "best_fold": best_fold,
+        "best_fold_idx": best_fold_idx,
+        "processed_embeddings": processed_embeddings
+    }
+
+def train_final_model(
+    embedding_files: List[str],
+    cv_results: Dict[str, Any],
+    output_dir: str,
+    n_states: int = 3,
+    covariance_type: str = "diag",
+    n_iter: int = 100,
+    pca_components: int = 20,
+    normalize: bool = True,
+    apply_standard_scaling: bool = True,
+    detect_and_handle_outliers: bool = True,
+    z_threshold: float = 3.0
+) -> Dict[str, Any]:
+    """Train final model on the largest embedding file using best configuration."""
+    
+    print(f"\n=== TRAINING FINAL MODEL ===")
+    
+    # Find the largest embedding file
+    file_sizes = [(f, get_file_size(f)) for f in embedding_files]
+    largest_file = max(file_sizes, key=lambda x: x[1])[0]
+    
+    print(f"Training final model on largest file: {os.path.basename(largest_file)}")
+    print(f"File size: {get_file_size(largest_file) / (1024*1024):.2f} MB")
+    
+    # Create final model output directory
+    final_dir = os.path.join(output_dir, "final_model")
+    os.makedirs(final_dir, exist_ok=True)
+    
+    # Load and preprocess the largest file
+    embeddings_dict, image_names = load_gnn_embeddings(largest_file)
+    embeddings = create_sequential_embeddings(embeddings_dict, image_names)
+    
+    # Plot original embedding distributions
+    orig_dist_plot = os.path.join(final_dir, "original_embedding_distributions.png")
+    plot_embedding_distributions(embeddings, orig_dist_plot, title="Final Model - Original GNN Embedding Distributions")
+    
+    # Apply same preprocessing as cross-validation
+    if normalize:
+        print("Normalizing embeddings...")
+        embeddings = normalize_embeddings(embeddings)
+        norm_dist_plot = os.path.join(final_dir, "normalized_embedding_distributions.png")
+        plot_embedding_distributions(embeddings, norm_dist_plot, title="Final Model - Normalized GNN Embedding Distributions")
+    
+    if detect_and_handle_outliers:
+        print(f"Detecting outliers...")
+        outlier_indices, cleaned_embeddings = detect_outliers(embeddings, z_threshold)
+        if len(outlier_indices) > 0:
+            print(f"Detected and cleaned {len(outlier_indices)} outliers")
+            embeddings = cleaned_embeddings
+            cleaned_dist_plot = os.path.join(final_dir, "cleaned_embedding_distributions.png")
+            plot_embedding_distributions(embeddings, cleaned_dist_plot, title="Final Model - Cleaned GNN Embedding Distributions")
+    
+    # Split data for final training/testing
+    split_index = int(len(embeddings) * (2/3))
+    train_embeddings = embeddings[:split_index]
+    train_frames = image_names[:split_index]
+    test_embeddings = embeddings[split_index:]
+    test_frames = image_names[split_index:]
+    
+    print(f"Final split: {len(train_embeddings)} training, {len(test_embeddings)} testing frames")
+    
+    # Apply dimensionality reduction
+    train_reduced, test_reduced, pca_model, scaler = reduce_dimensions(
+        train_embeddings=train_embeddings,
+        test_embeddings=test_embeddings,
+        n_components=pca_components,
+        apply_standard_scaling=apply_standard_scaling
+    )
+    
+    # Plot PCA explained variance
+    pca_variance_plot = os.path.join(final_dir, "pca_explained_variance.png")
+    plot_pca_variance(pca_model, pca_variance_plot, title="Final Model - PCA Explained Variance")
+    
+    # Plot reduced embedding distributions
+    reduced_dist_plot = os.path.join(final_dir, "reduced_embedding_distributions.png")
+    plot_embedding_distributions(
+        train_reduced, reduced_dist_plot, 
+        n_dims=min(5, train_reduced.shape[1]),
+        title="Final Model - Reduced GNN Embedding Distributions" + (" (with Standard Scaling)" if apply_standard_scaling else "")
+    )
+    
+    # Train final HMM
+    print(f"Training final HMM with {n_states} states...")
+    final_model, train_log_likelihood = train_hmm(
+        embeddings=train_reduced,
+        n_states=n_states,
+        covariance_type=covariance_type,
+        n_iter=n_iter,
+        verbose=True
+    )
+    
+    # Evaluate final model
+    train_evaluation = evaluate_hmm(final_model, train_reduced, train_frames)
+    test_evaluation = evaluate_hmm(final_model, test_reduced, test_frames)
+    test_log_likelihood = test_evaluation["log_likelihood"]
+    
+    print(f"Final model - Train Log Likelihood: {train_log_likelihood:.2f}")
+    print(f"Final model - Test Log Likelihood: {test_log_likelihood:.2f}")
+    
+    # Generate final model plots
+    # Transition matrix
+    transition_plot = os.path.join(final_dir, "transition_matrix.png")
+    plot_transition_matrix(
+        final_model.transmat_, 
+        transition_plot,
+        title=f"Final Model - HMM Transition Matrix (n_states={n_states})"
+    )
+    
+    # Markov chain graph
+    markov_graph = os.path.join(final_dir, "markov_chain_graph.png")
+    plot_hmm_graph(
+        final_model.transmat_,
+        markov_graph,
+        title=f"Final Model - HMM Markov Chain (n_states={n_states})"
+    )
+    
+    # State means
+    means_plot = os.path.join(final_dir, "state_means.png")
+    plot_state_means(
+        final_model.means_, 
+        means_plot,
+        title=f"Final Model - HMM State Means (n_states={n_states})"
+    )
+    
+    # State sequences
+    train_sequence_plot = os.path.join(final_dir, "train_state_sequence.png")
+    plot_state_sequence(
+        train_evaluation["hidden_states"], 
+        train_frames, 
+        train_sequence_plot,
+        title=f"Final Model - Training State Sequence (n_states={n_states})"
+    )
+    
+    test_sequence_plot = os.path.join(final_dir, "test_state_sequence.png")
+    plot_state_sequence(
+        test_evaluation["hidden_states"], 
+        test_frames, 
+        test_sequence_plot,
+        title=f"Final Model - Test State Sequence (n_states={n_states})"
+    )
+    
+    # State durations
+    durations_plot = os.path.join(final_dir, "state_durations.png")
+    plot_state_durations(
+        train_evaluation["state_durations"],
+        durations_plot,
+        title=f"Final Model - State Durations (n_states={n_states})"
+    )
+    
+    # Final model info
+    final_model_info = {
+        "training_file": os.path.basename(largest_file),
+        "file_size_mb": get_file_size(largest_file) / (1024*1024),
+        "n_states": n_states,
+        "covariance_type": covariance_type,
+        "original_embedding_shape": embeddings.shape,
+        "reduced_embedding_shape": train_reduced.shape,
+        "pca_components": pca_components,
+        "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
+        "normalization_applied": normalize,
+        "standard_scaling_applied": apply_standard_scaling,
+        "outlier_detection_applied": detect_and_handle_outliers,
+        "outliers_detected": len(outlier_indices) if detect_and_handle_outliers else 0,
+        "train_frames": len(train_frames),
+        "test_frames": len(test_frames),
+        "train_log_likelihood": float(train_log_likelihood),
+        "test_log_likelihood": float(test_log_likelihood),
+        "cross_validation_best_fold": cv_results["best_fold"]["fold"],
+        "cross_validation_best_score": cv_results["best_fold"]["combined_score"]
+    }
+    
+    # Save final model evaluation results
+    train_results_file = os.path.join(final_dir, "train_evaluation_results.json")
+    save_evaluation_results(train_evaluation, train_results_file, {**final_model_info, "dataset": "train"})
+    
+    test_results_file = os.path.join(final_dir, "test_evaluation_results.json")
+    save_evaluation_results(test_evaluation, test_results_file, {**final_model_info, "dataset": "test"})
+    
+    # Save final model summary
+    final_summary_file = os.path.join(final_dir, "final_model_summary.json")
+    with open(final_summary_file, 'w') as f:
+        json.dump(final_model_info, f, indent=2)
+    
+    return final_model_info
+
+def generate_cross_validation_plots(output_dir: str, cv_results: List[Dict]) -> None:
+    """Generate summary plots for cross-validation results."""
+    
+    print("\nGenerating cross-validation summary plots...")
+    
+    # Performance comparison plot
+    plt.figure(figsize=(15, 5))
+    
+    # Subplot 1: Combined scores
+    plt.subplot(1, 3, 1)
+    folds = [r["fold"] for r in cv_results]
+    combined_scores = [r["combined_score"] for r in cv_results]
+    colors = ['red' if score == max(combined_scores) else 'blue' for score in combined_scores]
+    
+    bars = plt.bar(folds, combined_scores, color=colors, alpha=0.7)
+    plt.xlabel("Fold")
+    plt.ylabel("Combined Score")
+    plt.title("Cross-Validation Performance")
+    plt.grid(alpha=0.3)
+    
+    # Add value labels on bars
+    for bar, score in zip(bars, combined_scores):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                f'{score:.2f}', ha='center', va='bottom', fontweight='bold')
+    
+    # Subplot 2: Train vs Test performance
+    plt.subplot(1, 3, 2)
+    train_lls = [r["train_log_likelihood"] for r in cv_results]
+    test_lls = [r["test_log_likelihood"] for r in cv_results]
+    
+    x = np.arange(len(folds))
+    width = 0.35
+    
+    plt.bar(x - width/2, train_lls, width, label='Train LL', alpha=0.7)
+    plt.bar(x + width/2, test_lls, width, label='Test LL', alpha=0.7)
+    
+    plt.xlabel("Fold")
+    plt.ylabel("Log Likelihood")
+    plt.title("Train vs Test Performance")
+    plt.xticks(x, folds)
+    plt.legend()
+    plt.grid(alpha=0.3)
+    
+    # Subplot 3: Data distribution
+    plt.subplot(1, 3, 3)
+    train_frames = [r["train_frames"] for r in cv_results]
+    test_frames = [r["test_frames"] for r in cv_results]
+    
+    plt.bar(x - width/2, train_frames, width, label='Train Frames', alpha=0.7)
+    plt.bar(x + width/2, test_frames, width, label='Test Frames', alpha=0.7)
+    
+    plt.xlabel("Fold")
+    plt.ylabel("Number of Frames")
+    plt.title("Data Distribution")
+    plt.xticks(x, folds)
+    plt.legend()
+    plt.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    cv_plot_file = os.path.join(output_dir, "cross_validation_summary.png")
+    plt.savefig(cv_plot_file, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved cross-validation summary plot to {cv_plot_file}")
 
 def main():
     
-    parser = argparse.ArgumentParser(description="Train and evaluate HMM models on GNN-based UI embeddings")
-    parser.add_argument("--input_dir", type=str, default="ui_embeddings",
+    parser = argparse.ArgumentParser(description="Cross-validation HMM training on multiple GNN embedding files")
+    parser.add_argument("--input_dir", type=str, required=True,
                         help="Directory containing embedding NPZ files")
-    parser.add_argument("--output_dir", type=str, default="gnn_hmm_results",
-                        help="Directory to save HMM results")
-    parser.add_argument("--embeddings_file", type=str, default="ui_embeddings.npz",
-                        help="Name of the embeddings NPZ file")
+    parser.add_argument("--output_dir", type=str, default="cv_gnn_hmm_results",
+                        help="Directory to save cross-validation results")
     parser.add_argument("--n_states", type=int, default=3,
                         help="Number of hidden states for the HMM")
     parser.add_argument("--covariance_type", type=str, default="diag",
@@ -1059,10 +1106,8 @@ def main():
                         help="Type of covariance matrix for the HMM")
     parser.add_argument("--n_iter", type=int, default=100,
                         help="Maximum number of iterations for EM algorithm")
-    parser.add_argument("--train_ratio", type=float, default=2/3,
-                        help="Ratio of data to use for training (default: 2/3)")
     parser.add_argument("--pca_components", type=int, default=20,
-                        help="Number of PCA components to use (default: 20)")
+                        help="Number of PCA components to use")
     parser.add_argument("--no_normalize", action="store_true",
                         help="Disable normalization of embeddings")
     parser.add_argument("--no_standard_scaling", action="store_true",
@@ -1070,32 +1115,65 @@ def main():
     parser.add_argument("--no_outlier_detection", action="store_true",
                         help="Disable outlier detection and handling")
     parser.add_argument("--z_threshold", type=float, default=3.0,
-                        help="Z-score threshold for outlier detection (default: 3.0)")
-    parser.add_argument("--compare_with_text", type=str, default=None,
-                        help="Path to text embeddings NPZ file for comparison")
+                        help="Z-score threshold for outlier detection")
+    parser.add_argument("--test_weight", type=float, default=0.7,
+                        help="Weight for test performance in combined metric")
+    parser.add_argument("--train_weight", type=float, default=0.3,
+                        help="Weight for train performance in combined metric")
     
     args = parser.parse_args()
+    
+    # Validate weights
+    if abs(args.test_weight + args.train_weight - 1.0) > 1e-6:
+        print("Warning: test_weight + train_weight should equal 1.0")
+        print(f"Current: {args.test_weight} + {args.train_weight} = {args.test_weight + args.train_weight}")
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Get embedding file path
-    embedding_file = os.path.join(args.input_dir, args.embeddings_file)
-    
-    if not os.path.exists(embedding_file):
-        print(f"Error: Embedding file not found at {embedding_file}")
+    # Find embedding files
+    try:
+        embedding_files = find_embedding_files(args.input_dir)
+    except ValueError as e:
+        print(f"Error: {e}")
         return
     
-    print(f"Found embedding file: {embedding_file}")
+    if len(embedding_files) != 3:
+        print(f"Error: Expected exactly 3 embedding files, found {len(embedding_files)}")
+        print("Files found:", [os.path.basename(f) for f in embedding_files])
+        return
     
-    # Process with train-test split and preprocessing
-    result = process_gnn_embeddings(
-        embedding_file=embedding_file,
+    print(f"\nStarting cross-validation HMM analysis...")
+    print(f"Embedding files: {[os.path.basename(f) for f in embedding_files]}")
+    print(f"Output directory: {args.output_dir}")
+    
+    # Perform cross-validation
+    cv_results = cross_validate_hmm(
+        embedding_files=embedding_files,
         output_dir=args.output_dir,
         n_states=args.n_states,
         covariance_type=args.covariance_type,
         n_iter=args.n_iter,
-        train_ratio=args.train_ratio,
+        pca_components=args.pca_components,
+        normalize=not args.no_normalize,
+        apply_standard_scaling=not args.no_standard_scaling,
+        detect_and_handle_outliers=not args.no_outlier_detection,
+        z_threshold=args.z_threshold,
+        test_weight=args.test_weight,
+        train_weight=args.train_weight
+    )
+    
+    # Generate cross-validation summary plots
+    generate_cross_validation_plots(args.output_dir, cv_results["cv_results"])
+    
+    # Train final model on largest file
+    final_model_info = train_final_model(
+        embedding_files=embedding_files,
+        cv_results=cv_results,
+        output_dir=args.output_dir,
+        n_states=args.n_states,
+        covariance_type=args.covariance_type,
+        n_iter=args.n_iter,
         pca_components=args.pca_components,
         normalize=not args.no_normalize,
         apply_standard_scaling=not args.no_standard_scaling,
@@ -1103,30 +1181,21 @@ def main():
         z_threshold=args.z_threshold
     )
     
-    # Generate summary plots
-    plot_hmm_results(args.output_dir, "GNN", "GNN Embedding")
-    
-    # Compare with text embeddings if provided
-    if args.compare_with_text:
-        print(f"\nComparing with text embeddings: {args.compare_with_text}")
-        compare_output_dir = os.path.join(args.output_dir, "comparison_with_text")
-        compare_state_sequences(
-            text_embedding_file=args.compare_with_text,
-            gnn_embedding_file=embedding_file,
-            output_dir=compare_output_dir,
-            n_states=args.n_states,
-            pca_components=args.pca_components
-        )
-    
-    print("\nGNN-HMM analysis complete!")
-    print(f"All results saved to {args.output_dir}")
-    print(f"Train log likelihood: {result['train_log_likelihood']:.2f}")
-    print(f"Test log likelihood: {result['test_log_likelihood']:.2f}")
-    print(f"PCA components used: {result['pca_components']}")
+    # Print final summary
+    print(f"\n{'='*50}")
+    print(f"CROSS-VALIDATION HMM ANALYSIS COMPLETE")
+    print(f"{'='*50}")
+    print(f"Best cross-validation fold: {cv_results['best_fold']['fold']}")
+    print(f"Best combined score: {cv_results['best_fold']['combined_score']:.2f}")
+    print(f"Final model trained on: {final_model_info['training_file']}")
+    print(f"Final model train LL: {final_model_info['train_log_likelihood']:.2f}")
+    print(f"Final model test LL: {final_model_info['test_log_likelihood']:.2f}")
+    print(f"All results saved to: {args.output_dir}")
+    print(f"{'='*50}")
 
 if __name__ == "__main__":
     main()
 
-
-# Direct mode: python src/gnn/graph_hmm_headless.py
-# CLI Mode: python src/gnn/graph_hmm_headless.py --input_dir path/to/embeddings --output_dir path/to/results --embeddings_file ui_embeddings.npz --covariance_type diag
+# Usage examples:
+# python cv_gnn_hmm.py --input_dir /path/to/embeddings --output_dir cv_results
+# python cv_gnn_hmm.py --input_dir ./embeddings --output_dir ./cv_results --n_states 5 --test_weight 0.8 --train_weight 0.2
