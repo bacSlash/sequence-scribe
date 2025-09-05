@@ -559,14 +559,31 @@ def save_evaluation_results(
     embedding_info: Dict[str, Any]
 ) -> None:
     
+    def convert_numpy_types(obj):
+        """Recursively convert numpy types to native Python types."""
+        if isinstance(obj, dict):
+            return {k: convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        else:
+            return obj
+    
     # Convert numpy arrays to lists for JSON serialization
     results = {
-        "embedding_info": embedding_info,
+        "embedding_info": convert_numpy_types(embedding_info),
         "log_likelihood": float(evaluation["log_likelihood"]),
         "state_proportions": evaluation["state_proportions"].tolist(),
         "transition_matrix": evaluation["transition_matrix"].tolist(),
-        "num_frames": len(evaluation["hidden_states"]),
-        "hidden_states": evaluation["hidden_states"].tolist()
+        "num_frames": int(len(evaluation["hidden_states"])),
+        "hidden_states": [int(state) for state in evaluation["hidden_states"]]
     }
     
     # Add frame to state mapping
@@ -578,8 +595,11 @@ def save_evaluation_results(
     # Format transition counts for readability
     transition_counts = {}
     for (from_state, to_state), count in evaluation["transition_counts"].items():
-        transition_counts[f"{from_state}->{to_state}"] = count
+        transition_counts[f"{int(from_state)}->{int(to_state)}"] = int(count)
     results["transition_counts"] = transition_counts
+    
+    # Convert everything to ensure no numpy types remain
+    results = convert_numpy_types(results)
     
     # Save to JSON
     with open(output_path, 'w') as f:
