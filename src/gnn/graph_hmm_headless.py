@@ -647,13 +647,14 @@ def cross_validate_hmm(
     test_weight: float = 0.7,
     train_weight: float = 0.3
 ) -> Dict[str, Any]:
-    """Perform 3-fold cross-validation on embedding files."""
+    """Perform 3-fold cross-validation on embedding files without merging datasets."""
     
     if len(embedding_files) != 3:
         raise ValueError(f"Expected exactly 3 embedding files, got {len(embedding_files)}")
     
     print(f"\nStarting 3-fold cross-validation...")
     print(f"Performance metric: {test_weight:.1f} * test_ll + {train_weight:.1f} * train_ll")
+    print("Training separate models on each training file, then averaging results")
     
     # Prepare embeddings
     processed_embeddings = prepare_embeddings_for_training(
@@ -669,61 +670,77 @@ def cross_validate_hmm(
         test_file = [f for f in embedding_files if f not in train_files][0]
         
         print(f"\n=== FOLD {fold_idx + 1}/3 ===")
-        print(f"Training on: {[os.path.basename(f) for f in train_files]}")
+        print(f"Training on: {[os.path.basename(f) for f in train_files]} (separately)")
         print(f"Testing on: {os.path.basename(test_file)}")
         
         # Create fold output directory
         fold_dir = os.path.join(output_dir, f"fold_{fold_idx + 1}")
         os.makedirs(fold_dir, exist_ok=True)
         
-        # Combine training embeddings
-        train_embeddings_list = []
-        train_frame_names_list = []
-        
-        for train_file in train_files:
-            embeddings, frame_names = processed_embeddings[train_file]
-            train_embeddings_list.append(embeddings)
-            # Prefix frame names with file identifier to avoid conflicts
-            file_prefix = os.path.splitext(os.path.basename(train_file))[0]
-            prefixed_names = [f"{file_prefix}_{name}" for name in frame_names]
-            train_frame_names_list.extend(prefixed_names)
-        
-        # Concatenate training data
-        train_embeddings = np.vstack(train_embeddings_list)
-        train_frame_names = train_frame_names_list
-        
         # Get test data
         test_embeddings, test_frame_names = processed_embeddings[test_file]
         
-        print(f"Training data shape: {train_embeddings.shape}")
-        print(f"Test data shape: {test_embeddings.shape}")
+        # Train separate models on each training file
+        train_results = []
+        trained_models = []
         
-        # Apply dimensionality reduction
-        train_reduced, test_reduced, pca_model, scaler = reduce_dimensions(
-            train_embeddings=train_embeddings,
-            test_embeddings=test_embeddings,
-            n_components=pca_components,
-            apply_standard_scaling=apply_standard_scaling
-        )
+        for train_idx, train_file in enumerate(train_files):
+            train_embeddings, train_frame_names = processed_embeddings[train_file]
+            
+            print(f"\n--- Training Model {train_idx + 1} on {os.path.basename(train_file)} ---")
+            print(f"Training data shape: {train_embeddings.shape}")
+            
+            # Apply dimensionality reduction (fit PCA on this training set)
+            # We need a dummy test set for the reduce_dimensions function, use a small subset of train data
+            dummy_test = train_embeddings[:min(10, len(train_embeddings))]
+            train_reduced, _, pca_model, scaler = reduce_dimensions(
+                train_embeddings=train_embeddings,
+                test_embeddings=dummy_test,
+                n_components=pca_components,
+                apply_standard_scaling=apply_standard_scaling
+            )
+            
+            # Apply the same PCA transformation to test data
+            test_reduced = pca_model.transform(test_embeddings)
+            if scaler is not None:
+                test_reduced = scaler.transform(test_reduced)
+            
+            # Train HMM
+            model, train_log_likelihood = train_hmm(
+                embeddings=train_reduced,
+                n_states=n_states,
+                covariance_type=covariance_type,
+                n_iter=n_iter,
+                verbose=False
+            )
+            
+            # Evaluate on test data
+            test_log_likelihood = model.score(test_reduced)
+            
+            print(f"Model {train_idx + 1} - Train LL: {train_log_likelihood:.2f}, Test LL: {test_log_likelihood:.2f}")
+            
+            train_results.append({
+                "train_file": train_file,
+                "train_ll": train_log_likelihood,
+                "test_ll": test_log_likelihood,
+                "model": model,
+                "pca_model": pca_model,
+                "scaler": scaler,
+                "train_embeddings": train_embeddings,
+                "train_frame_names": train_frame_names,
+                "train_reduced": train_reduced,
+                "test_reduced": test_reduced
+            })
+            trained_models.append(model)
         
-        # Train HMM
-        model, train_log_likelihood = train_hmm(
-            embeddings=train_reduced,
-            n_states=n_states,
-            covariance_type=covariance_type,
-            n_iter=n_iter,
-            verbose=False
-        )
+        # Average the results from both training models
+        avg_train_ll = np.mean([r["train_ll"] for r in train_results])
+        avg_test_ll = np.mean([r["test_ll"] for r in train_results])
+        combined_score = test_weight * avg_test_ll + train_weight * avg_train_ll
         
-        # Evaluate on test data
-        test_evaluation = evaluate_hmm(model, test_reduced, test_frame_names)
-        test_log_likelihood = test_evaluation["log_likelihood"]
-        
-        # Calculate combined performance metric
-        combined_score = test_weight * test_log_likelihood + train_weight * train_log_likelihood
-        
-        print(f"Train Log Likelihood: {train_log_likelihood:.2f}")
-        print(f"Test Log Likelihood: {test_log_likelihood:.2f}")
+        print(f"\n--- Fold {fold_idx + 1} Summary ---")
+        print(f"Average Train Log Likelihood: {avg_train_ll:.2f}")
+        print(f"Average Test Log Likelihood: {avg_test_ll:.2f}")
         print(f"Combined Score: {combined_score:.2f}")
         
         # Store fold results
@@ -731,41 +748,39 @@ def cross_validate_hmm(
             "fold": fold_idx + 1,
             "train_files": [os.path.basename(f) for f in train_files],
             "test_file": os.path.basename(test_file),
-            "train_log_likelihood": float(train_log_likelihood),
-            "test_log_likelihood": float(test_log_likelihood),
+            "train_log_likelihood": float(avg_train_ll),
+            "test_log_likelihood": float(avg_test_ll),
             "combined_score": float(combined_score),
-            "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
-            "train_frames": len(train_frame_names),
+            "individual_train_results": [
+                {
+                    "file": os.path.basename(r["train_file"]),
+                    "train_ll": float(r["train_ll"]),
+                    "test_ll": float(r["test_ll"])
+                } for r in train_results
+            ],
+            "train_frames": sum(len(r["train_frame_names"]) for r in train_results),
             "test_frames": len(test_frame_names)
         }
         cv_results.append(fold_result)
         
-        # Save fold-specific results
-        fold_info = {
-            "fold": fold_idx + 1,
-            "train_files": train_files,
-            "test_file": test_file,
-            "n_states": n_states,
-            "covariance_type": covariance_type,
-            "pca_components": pca_components,
-            "pca_explained_variance": float(sum(pca_model.explained_variance_ratio_) * 100),
-            "normalization_applied": normalize,
-            "standard_scaling_applied": apply_standard_scaling,
-            "outlier_detection_applied": detect_and_handle_outliers,
-            "train_frames": len(train_frame_names),
-            "test_frames": len(test_frame_names)
-        }
+        # Select the better performing model for visualization (higher test LL)
+        best_model_idx = np.argmax([r["test_ll"] for r in train_results])
+        best_result = train_results[best_model_idx]
         
-        # Evaluate on training data for completeness
-        train_evaluation = evaluate_hmm(model, train_reduced, train_frame_names)
+        print(f"Using Model {best_model_idx + 1} for fold visualizations (better test performance)")
         
-        # Generate fold plots
+        # Generate fold plots using the best model
+        model = best_result["model"]
+        train_reduced = best_result["train_reduced"] 
+        test_reduced = best_result["test_reduced"]
+        train_frame_names = best_result["train_frame_names"]
+        
         # Transition matrix
         transition_plot = os.path.join(fold_dir, "transition_matrix.png")
         plot_transition_matrix(
             model.transmat_, 
             transition_plot,
-            title=f"Fold {fold_idx + 1} - HMM Transition Matrix"
+            title=f"Fold {fold_idx + 1} - HMM Transition Matrix (Best Model)"
         )
         
         # Markov chain graph
@@ -773,16 +788,27 @@ def cross_validate_hmm(
         plot_hmm_graph(
             model.transmat_,
             markov_graph,
-            title=f"Fold {fold_idx + 1} - HMM Markov Chain"
+            title=f"Fold {fold_idx + 1} - HMM Markov Chain (Best Model)"
+        )
+        
+        # State sequence for training data (best model)
+        train_evaluation = evaluate_hmm(model, train_reduced, train_frame_names)
+        train_sequence_plot = os.path.join(fold_dir, "train_state_sequence.png")
+        plot_state_sequence(
+            train_evaluation["hidden_states"], 
+            train_frame_names, 
+            train_sequence_plot,
+            title=f"Fold {fold_idx + 1} - Train State Sequence (Best Model)"
         )
         
         # State sequence for test data
+        test_evaluation = evaluate_hmm(model, test_reduced, test_frame_names)
         test_sequence_plot = os.path.join(fold_dir, "test_state_sequence.png")
         plot_state_sequence(
             test_evaluation["hidden_states"], 
             test_frame_names, 
             test_sequence_plot,
-            title=f"Fold {fold_idx + 1} - Test State Sequence"
+            title=f"Fold {fold_idx + 1} - Test State Sequence (Best Model)"
         )
         
         # State means
@@ -790,10 +816,34 @@ def cross_validate_hmm(
         plot_state_means(
             model.means_, 
             means_plot,
-            title=f"Fold {fold_idx + 1} - HMM State Means"
+            title=f"Fold {fold_idx + 1} - HMM State Means (Best Model)"
         )
         
-        # Save fold evaluation results
+        # Save detailed fold information
+        fold_info = {
+            "fold": fold_idx + 1,
+            "train_files": [os.path.basename(f) for f in train_files],
+            "test_file": os.path.basename(test_file),
+            "n_states": n_states,
+            "covariance_type": covariance_type,
+            "pca_components": pca_components,
+            "normalization_applied": normalize,
+            "standard_scaling_applied": apply_standard_scaling,
+            "outlier_detection_applied": detect_and_handle_outliers,
+            "individual_models": fold_result["individual_train_results"],
+            "averaged_results": {
+                "train_ll": float(avg_train_ll),
+                "test_ll": float(avg_test_ll),
+                "combined_score": float(combined_score)
+            },
+            "best_model_for_visualization": {
+                "model_index": best_model_idx + 1,
+                "train_file": os.path.basename(best_result["train_file"]),
+                "test_ll": float(best_result["test_ll"])
+            }
+        }
+        
+        # Save fold evaluation results (using best model)
         train_results_file = os.path.join(fold_dir, "train_evaluation_results.json")
         save_evaluation_results(train_evaluation, train_results_file, {**fold_info, "dataset": "train"})
         
@@ -812,7 +862,7 @@ def cross_validate_hmm(
     print(f"\n=== CROSS-VALIDATION RESULTS ===")
     for result in cv_results:
         print(f"Fold {result['fold']}: Combined Score = {result['combined_score']:.2f} "
-              f"(Train: {result['train_log_likelihood']:.2f}, Test: {result['test_log_likelihood']:.2f})")
+              f"(Avg Train: {result['train_log_likelihood']:.2f}, Avg Test: {result['test_log_likelihood']:.2f})")
     
     print(f"\nBest performing fold: {best_fold['fold']} with combined score: {best_fold['combined_score']:.2f}")
     
@@ -821,6 +871,7 @@ def cross_validate_hmm(
         "cross_validation_results": cv_results,
         "best_fold": best_fold,
         "performance_weights": {"test_weight": test_weight, "train_weight": train_weight},
+        "methodology": "Separate models trained on each training file, results averaged",
         "hyperparameters": {
             "n_states": n_states,
             "covariance_type": covariance_type,
