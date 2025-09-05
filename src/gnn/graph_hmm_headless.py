@@ -25,6 +25,9 @@ def load_gnn_embeddings(npz_file: str) -> Tuple[Dict[str, np.ndarray], List[str]
         # Load the NPZ file
         data = np.load(npz_file, allow_pickle=True)
         
+        print(f"NPZ file keys (first 10): {list(data.files)[:10]}")
+        print(f"Total keys in NPZ: {len(data.files)}")
+        
         # Extract embeddings and image names
         embeddings_dict = {}
         for key in data.files:
@@ -33,12 +36,16 @@ def load_gnn_embeddings(npz_file: str) -> Tuple[Dict[str, np.ndarray], List[str]
         # Load metadata file to get proper ordering of images
         metadata_file = os.path.join(os.path.dirname(npz_file), "embeddings_metadata.json")
         if os.path.exists(metadata_file):
+            print(f"Found metadata file: {metadata_file}")
             with open(metadata_file, 'r') as f:
                 metadata = json.load(f)
             image_names = metadata.get("image_names", list(embeddings_dict.keys()))
+            print(f"Metadata image_names (first 10): {image_names[:10]}")
         else:
+            print("No metadata file found, using NPZ keys directly")
             # If metadata doesn't exist, use dictionary keys
             image_names = list(embeddings_dict.keys())
+            print(f"NPZ keys as image_names (first 10): {image_names[:10]}")
             
         # Ensure image_names are strings
         image_names = [str(name) for name in image_names]
@@ -968,9 +975,9 @@ def train_final_model(
     # Split data for final training/testing
     split_index = int(len(embeddings) * (2/3))
     train_embeddings = embeddings[:split_index]
-    train_frames = image_names[:split_index]
+    train_frames = sorted_frame_names[:split_index]
     test_embeddings = embeddings[split_index:]
-    test_frames = image_names[split_index:]
+    test_frames = sorted_frame_names[split_index:]
     
     print(f"Final split: {len(train_embeddings)} training, {len(test_embeddings)} testing frames")
     
